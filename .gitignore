@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+.DS_Store
+标定照片/
+独立验证照片/
+室内照片/
+frontend/node_modules/
+frontend/dist/
+
+.pnpm-store/
+
+.runtime/
