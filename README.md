@@ -2,7 +2,7 @@
 
 A local web application for reconstructing metric-scale, colored point clouds from RGB images and ARKit LiDAR depth captures. It combines image-based camera reconstruction with measured depth, then provides a browser-based workspace for inspecting, measuring, and exporting the results.
 
-The backend runs on your computer at [http://127.0.0.1:8765](http://127.0.0.1:8765). Uploaded captures, processing logs, and reconstructed models are stored locally. After dependencies are installed and the frontend is built, normal operation does not require an internet connection. The current user interface is in Chinese.
+The backend runs on your computer at [http://127.0.0.1:8765](http://127.0.0.1:8765). Uploaded captures, processing logs, and reconstructed models are stored locally. After dependencies are installed and the frontend is built, normal operation does not require an internet connection. The workbench user interface is in English. Original processing logs and user-supplied project names may contain other languages.
 
 ## Features
 
@@ -20,7 +20,7 @@ The backend runs on your computer at [http://127.0.0.1:8765](http://127.0.0.1:87
 
 ### Already configured on this Mac
 
-1. Double-click `启动工作台.command` in the project folder.
+1. Double-click `Start Workbench.command` in the project folder.
 2. Keep the terminal window running.
 3. Open [http://127.0.0.1:8765](http://127.0.0.1:8765) in your browser.
 4. When finished, press **Ctrl+C in that terminal window** to stop the service.
@@ -135,10 +135,10 @@ The batch upload limit is **2,000,000,000 bytes** (2 GB decimal). Images are lim
 
 ## Using the Workbench
 
-1. Click **New Model** (`新建模型`) or **New** (`新建`).
+1. Click **New model** in the sidebar.
 2. Choose a complete capture folder or upload a ZIP. Drag-and-drop supports ZIP files; use the folder picker for folders.
-3. Enter a project name and enable small-batch diagnostics if needed.
-4. Click **Upload and Reconstruct** (`上传并自动建模`).
+3. Enter a project name and enable small-batch diagnostics in the upload form if needed.
+4. Click **Upload and Reconstruct**.
 5. Follow the processing stages: validation, depth preprocessing, camera reconstruction, depth fusion, and export/audit.
 6. Review the reconstructed models, registered camera count, quality report, and image/depth/confidence previews.
 7. Download the outputs you need.
@@ -146,6 +146,10 @@ The batch upload limit is **2,000,000,000 bytes** (2 GB decimal). Images are lim
 Jobs are processed one at a time. The interface reports processing stages rather than an estimated reconstruction percentage. Retrying creates a separate job version.
 
 A **partial** result can contain usable outputs. This status is used when some model fusions fail, multiple separate models are produced, or the largest successful model registers fewer than 80% of usable images. Review the report before treating a partial reconstruction as complete.
+
+### Deleting a model
+
+On a project result page, select **Delete model** and confirm the deletion. This permanently removes the project, all reconstruction versions, uploaded captures, and result files. Versions share source data, so deletion applies to the entire project. Projects with active uploads or processing jobs cannot be deleted. Files exported elsewhere are unaffected.
 
 ### Reconstruction settings
 
@@ -163,7 +167,7 @@ The clarity threshold produces a warning; it does not automatically remove an im
 
 ### Measuring distances
 
-Select **Two-point Measurement** (`两点测距`), then select two actual points in the cloud. The viewer reports the straight-line Euclidean distance between those endpoints. Selecting another point starts a new measurement.
+Select **Measure distance**, then select two actual points in the cloud. The viewer reports the straight-line Euclidean distance between those endpoints. Selecting another point starts a new measurement.
 
 Check the viewing angle and occlusion carefully to avoid selecting background points. This tool does not automatically detect object edges, and its accuracy has not been independently validated against physical measurements.
 
@@ -235,7 +239,7 @@ The launcher binds to `127.0.0.1`, and the backend restricts accepted hosts and 
 ├── requirements.lock.txt       # Separate earlier dependency snapshot
 ├── requirements.dev.txt        # Optional development tools
 ├── start_workbench.sh          # Local service launcher
-└── 启动工作台.command           # Double-click launcher for macOS
+└── Start Workbench.command           # Double-click launcher for macOS
 ```
 
 The principal processing scripts are `parse_capture_depth.py`, `reconstruct_captures.py`, `fuse_lidar_depth.py`, and `audit_capture_result.py`. Other scripts include earlier calibration and diagnostic experiments and are not all part of the web workflow.
@@ -338,9 +342,9 @@ Interactive API documentation is available at [http://127.0.0.1:8765/docs](http:
 
 The following documents are currently in Chinese:
 
-- [Workbench usage guide](docs/工作台使用说明.md)
-- [Code reading guide](docs/代码阅读指南.md)
-- [Capture and stage acceptance notes](docs/拍摄与阶段验收.md)
-- [Captures4 frontend/backend implementation plan](docs/Captures4前后端实施方案.md)
-- [Implementation plan v2](docs/实施计划_v2.md)
+- [Workbench usage guide](docs/%E5%B7%A5%E4%BD%9C%E5%8F%B0%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md)
+- [Code reading guide](docs/%E4%BB%A3%E7%A0%81%E9%98%85%E8%AF%BB%E6%8C%87%E5%8D%97.md)
+- [Capture and stage acceptance notes](docs/%E6%8B%8D%E6%91%84%E4%B8%8E%E9%98%B6%E6%AE%B5%E9%AA%8C%E6%94%B6.md)
+- [Captures4 frontend/backend implementation plan](docs/Captures4%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AE%9E%E6%96%BD%E6%96%B9%E6%A1%88.md)
+- [Implementation plan v2](docs/%E5%AE%9E%E6%96%BD%E8%AE%A1%E5%88%92_v2.md)
 - [Historical report generators](report_generators/README.md)
