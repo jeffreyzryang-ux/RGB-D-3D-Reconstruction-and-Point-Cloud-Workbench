@@ -28,15 +28,15 @@ struct DepthSnapshot {
 
 func packedPixels(_ buffer: CVPixelBuffer, format: OSType, bytesPerPixel: Int) throws -> Data {
     guard CVPixelBufferGetPixelFormatType(buffer) == format,
-          !CVPixelBufferIsPlanar(buffer) else { throw captureError("不支持的深度数据格式。") }
+          !CVPixelBufferIsPlanar(buffer) else { throw captureError("Unsupported depth format.") }
     guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else {
-        throw captureError("无法读取深度缓冲区。")
+        throw captureError("Could not read the depth buffer.")
     }
     defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-    guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw captureError("深度缓冲区为空。") }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw captureError("The depth buffer is empty.") }
     let rowSize = CVPixelBufferGetWidth(buffer) * bytesPerPixel
     let stride = CVPixelBufferGetBytesPerRow(buffer)
-    guard stride >= rowSize else { throw captureError("无效的深度行宽。") }
+    guard stride >= rowSize else { throw captureError("Invalid depth row stride.") }
     var data = Data(capacity: rowSize * CVPixelBufferGetHeight(buffer))
     for y in 0..<CVPixelBufferGetHeight(buffer) {
         data.append(base.advanced(by: y * stride).assumingMemoryBound(to: UInt8.self), count: rowSize)
@@ -102,11 +102,11 @@ final class CaptureStore {
         guard let cg = context.createCGImage(image, from: image.extent),
               cg.width == metadata["image_width"] as? Int,
               cg.height == metadata["image_height"] as? Int else {
-            throw captureError("图像尺寸与内参不匹配，未保存。")
+            throw captureError("Image dimensions do not match the intrinsics. Capture not saved.")
         }
         let url = staging.appendingPathComponent("image.jpg")
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
-            throw captureError("无法创建 JPEG 文件。")
+            throw captureError("Could not create the JPEG file.")
         }
         let properties: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: 0.98,
@@ -114,7 +114,7 @@ final class CaptureStore {
             kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: comment]
         ]
         CGImageDestinationAddImage(destination, cg, properties as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else { throw captureError("JPEG 保存失败。") }
+        guard CGImageDestinationFinalize(destination) else { throw captureError("Could not save the JPEG.") }
         // Verify the actual saved JPEG, not just the in-memory metadata.
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let saved = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
@@ -122,18 +122,18 @@ final class CaptureStore {
               exif[kCGImagePropertyExifUserComment as String] as? String == comment,
               saved[kCGImagePropertyPixelWidth as String] as? Int == cg.width,
               saved[kCGImagePropertyPixelHeight as String] as? Int == cg.height else {
-            throw captureError("图片元数据校验失败，未计入已保存照片。")
+            throw captureError("Image metadata verification failed. Capture not saved.")
         }
         if let depth = depth {
             let width = CVPixelBufferGetWidth(depth.map)
             let height = CVPixelBufferGetHeight(depth.map)
             guard depth.metadata["width"] as? Int == width,
-                  depth.metadata["height"] as? Int == height else { throw captureError("深度尺寸不匹配。") }
+                  depth.metadata["height"] as? Int == height else { throw captureError("Depth dimensions do not match.") }
             let values = try packedPixels(depth.map, format: kCVPixelFormatType_DepthFloat32, bytesPerPixel: 4)
             try values.write(to: staging.appendingPathComponent("depth.f32"), options: .atomic)
             if let confidence = depth.confidence {
                 guard CVPixelBufferGetWidth(confidence) == width,
-                      CVPixelBufferGetHeight(confidence) == height else { throw captureError("置信度尺寸不匹配。") }
+                      CVPixelBufferGetHeight(confidence) == height else { throw captureError("Confidence dimensions do not match.") }
                 try packedPixels(confidence, format: kCVPixelFormatType_OneComponent8, bytesPerPixel: 1)
                     .write(to: staging.appendingPathComponent("confidence.u8"), options: .atomic)
             }
@@ -145,7 +145,7 @@ final class CaptureStore {
     }
     func delete(name: String) throws {
         guard let number = Int(name), number > 0, String(number) == name else {
-            throw captureError("无效的照片编号。")
+            throw captureError("Invalid capture ID.")
         }
         // Delete the complete pair together; never leave a loose calibration file.
         try FileManager.default.removeItem(at: root.appendingPathComponent(name))
@@ -157,7 +157,7 @@ final class CaptureStore {
             .sorted { Int($0)! < Int($1)! }
         guard names.count == (try count()), Set(names).count == names.count,
               names.allSatisfy({ Int($0).map { $0 > 0 } ?? false }) else {
-            throw captureError("照片排序与当前批次不一致，请重试。")
+            throw captureError("Photo order does not match the current batch. Please try again.")
         }
         let staging = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let package = staging.appendingPathComponent("Captures")
@@ -185,7 +185,7 @@ final class CaptureStore {
         }
         if let error = coordinationError { throw error }
         if let error = copyError { throw error }
-        guard FileManager.default.fileExists(atPath: target.path) else { throw captureError("打包失败。") }
+        guard FileManager.default.fileExists(atPath: target.path) else { throw captureError("Could not create the archive.") }
         return target
     }
 }
@@ -196,10 +196,10 @@ struct SavedPhoto: Identifiable {
 }
 
 final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
-    @Published var status = "正在准备相机…"
-    @Published var depthStatus = "正在检测 LiDAR…"
+    @Published var status = "Preparing camera…"
+    @Published var depthStatus = "Checking LiDAR…"
     private var depthEnabled = false
-    @Published var resolution = "等待图像"
+    @Published var resolution = "Waiting for image"
     @Published var count = 0
     @Published var photos: [SavedPhoto] = []
     @Published var ready = false
@@ -227,7 +227,7 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
                 let n = try self.store.count()
                 DispatchQueue.main.async { self.count = n; self.initialized = true }
             } catch {
-                DispatchQueue.main.async { self.status = "存储准备失败：\(error.localizedDescription)" }
+                DispatchQueue.main.async { self.status = "Could not prepare storage: \(error.localizedDescription)" }
             }
         }
     }
@@ -242,7 +242,7 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
         nextCaptureNumber = 1
         archive = nil
         lastSavedTimestamp = -1
-        status = clearLocalStorage ? "正在清理本地照片和 ZIP…" : "正在开始新一批拍摄…"
+        status = clearLocalStorage ? "Clearing local photos and ZIPs…" : "Starting a new batch…"
         writer.async {
             self.store = CaptureStore()
             do {
@@ -259,7 +259,7 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
             } catch {
                 DispatchQueue.main.async {
                     self.busy = false
-                    self.status = "操作未完成：\(error.localizedDescription)，请重试。"
+                    self.status = "Operation failed: \(error.localizedDescription). Please try again."
                 }
             }
         }
@@ -267,24 +267,24 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
     func start() {
         guard !running else { return }
         guard ARWorldTrackingConfiguration.isSupported else {
-            status = "请在支持 ARKit 的真实 iPhone 上运行。"; return
+            status = "Run on a real iPhone that supports ARKit."; return
         }
         let request = UUID()
         token = request
-        status = "等待相机权限…"
+        status = "Waiting for camera permission…"
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self = self, self.token == request else { return }
-                guard granted else { self.status = "请在系统设置中允许相机权限。"; return }
+                guard granted else { self.status = "Allow camera access in Settings."; return }
                 let configuration = ARWorldTrackingConfiguration()
                 configuration.isAutoFocusEnabled = true
                 self.depthEnabled = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
                 if self.depthEnabled { configuration.frameSemantics.insert(.sceneDepth) }
-                self.depthStatus = self.depthEnabled ? "LiDAR：等待深度帧" : "此设备不支持 LiDAR 深度，仅保存彩色照片"
+                self.depthStatus = self.depthEnabled ? "LiDAR: waiting for depth" : "LiDAR unavailable. Saving RGB photos only."
                 self.ready = false
                 self.startedAt = ProcessInfo.processInfo.systemUptime
                 self.running = true
-                self.status = "相机预热中，请保持稳定…"
+                self.status = "Warming up camera. Hold steady…"
                 self.session.run(configuration)
             }
         }
@@ -310,31 +310,31 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
         let label = "\(Int(size.width)) × \(Int(size.height))"
         if resolution != label { resolution = label }
         if depthEnabled {
-            let label = frame.sceneDepth.map { "LiDAR 深度：\(CVPixelBufferGetWidth($0.depthMap)) × \(CVPixelBufferGetHeight($0.depthMap))" } ?? "LiDAR：等待深度帧"
+            let label = frame.sceneDepth.map { "LiDAR depth: \(CVPixelBufferGetWidth($0.depthMap)) × \(CVPixelBufferGetHeight($0.depthMap))" } ?? "LiDAR: waiting for depth"
             if depthStatus != label { depthStatus = label }
         }
         if !ready && initialized && ProcessInfo.processInfo.systemUptime - startedAt >= 2 {
             ready = true
-            status = "可以拍摄；每张照片保存对应的同帧内参。"
+            status = "Ready. Each photo includes intrinsics from the same frame."
         }
     }
     func shoot() {
         guard ready, !busy, let frame = session.currentFrame else { return }
         guard ProcessInfo.processInfo.systemUptime - frame.timestamp < 0.5,
               frame.timestamp != lastSavedTimestamp else {
-            status = "等待新的相机帧…"; return
+            status = "Waiting for a new camera frame…"; return
         }
         let buffer = frame.capturedImage
         let k = frame.camera.intrinsics
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         guard width == Int(frame.camera.imageResolution.width), height == Int(frame.camera.imageResolution.height) else {
-            status = "图像与内参尺寸不匹配，未拍摄。"; return
+            status = "Image and intrinsics dimensions do not match. Capture skipped."; return
         }
         var depth: DepthSnapshot?
         if depthEnabled {
             guard let sample = frame.sceneDepth else {
-                status = "当前帧没有 LiDAR 深度，请稍后再拍。"; return
+                status = "No LiDAR depth in this frame. Try again shortly."; return
             }
             let dw = CVPixelBufferGetWidth(sample.depthMap)
             let dh = CVPixelBufferGetHeight(sample.depthMap)
@@ -376,7 +376,7 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
         ]
         busy = true
         lastSavedTimestamp = frame.timestamp
-        status = "正在保存照片和内参…"
+        status = "Saving photo and intrinsics…"
         // Keep the pixel buffer, not the whole ARFrame; at most one write is in flight.
         let task = UIApplication.shared.beginBackgroundTask(withName: "Save photo", expirationHandler: nil)
         writer.async {
@@ -388,13 +388,13 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
                 self.busy = false
                 if let error = failure {
                     self.stopAuto()
-                    self.status = "保存失败：\(error.localizedDescription)"
+                    self.status = "Save failed: \(error.localizedDescription)"
                 } else {
                     self.nextCaptureNumber += 1
                     self.count += 1
                     self.photos.append(SavedPhoto(id: name, url: savedURL))
                     self.archive = nil
-                    self.status = "已保存 \(self.count) 张，图像与内参已校验。"
+                    self.status = "Saved \(self.count) photos. Images and intrinsics verified."
                 }
                 if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
             }
@@ -407,7 +407,7 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
         stopAuto()
         busy = true
         archive = nil
-        status = "正在删除照片和配套内参…"
+        status = "Deleting photos and associated intrinsics…"
         writer.async {
             var deleted = Set<String>()
             var failure: Error?
@@ -420,9 +420,9 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
                 self.count = self.photos.count
                 self.busy = false
                 if let error = failure {
-                    self.status = "删除失败：\(error.localizedDescription)"
+                    self.status = "Delete failed: \(error.localizedDescription)"
                 } else {
-                    self.status = "已删除 \(deleted.count) 张，本批剩余 \(self.count) 张。"
+                    self.status = "Deleted \(deleted.count) photos. \(self.count) remaining in this batch."
                 }
             }
         }
@@ -434,7 +434,7 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
     }
     func export() {
         guard !busy, count > 0 else { return }
-        stopAuto(); busy = true; status = "正在打包当前批次照片…"
+        stopAuto(); busy = true; status = "Packaging the current batch…"
         let task = UIApplication.shared.beginBackgroundTask(withName: "Export photos", expirationHandler: nil)
         let order = photos.map { $0.id }
         writer.async {
@@ -444,18 +444,18 @@ final class CameraReader: NSObject, ObservableObject, ARSessionDelegate {
                 switch result {
                 case .success(let url):
                     self.archive = CaptureArchive(url: url)
-                    self.status = "ZIP 已生成，可 AirDrop 或存储到文件。"
-                case .failure(let error): self.status = "打包失败：\(error.localizedDescription)"
+                    self.status = "ZIP ready. Share via AirDrop or save to Files."
+                case .failure(let error): self.status = "Export failed: \(error.localizedDescription)"
                 }
                 if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
             }
         }
     }
     func session(_ session: ARSession, didFailWithError error: Error) {
-        stop(); status = "相机错误：\(error.localizedDescription)。请点击重置相机。"
+        stop(); status = "Camera error: \(error.localizedDescription). Tap New Batch to reset the camera."
     }
     func sessionWasInterrupted(_ session: ARSession) {
-        stop(); status = "相机已中断，请点击重置相机。"
+        stop(); status = "Camera interrupted. Tap New Batch to reset."
     }
 }
 
@@ -486,9 +486,9 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 12) {
             HStack {
-                Text("内参相机").font(.title2.bold())
+                Text("Intrinsics Camera").font(.title2.bold())
                 Spacer()
-                Text("本批 \(camera.count) 张")
+                Text("Photos: \(camera.count)")
             }
             CameraPreview(session: camera.session)
                 .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -500,29 +500,29 @@ struct ContentView: View {
             Text(camera.depthStatus).font(.caption).foregroundStyle(.secondary)
             Text(camera.status).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 20) {
-                Button(camera.automatic ? "停止连拍" : "每 2 秒连拍") { camera.toggleAuto() }
+                Button(camera.automatic ? "Stop Auto" : "Auto · 2 sec") { camera.toggleAuto() }
                     .disabled(!camera.automatic && (!camera.ready || camera.busy))
                 Button { camera.shoot() } label: {
                     Image(systemName: "camera.fill").font(.title).padding(16)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!camera.ready || camera.busy || camera.automatic)
-                Button("打包分享") { camera.export() }
+                Button("Export ZIP") { camera.export() }
                     .disabled(camera.count == 0 || camera.busy)
             }
-            Button("已拍照片 · 预览与排序（\(camera.count)）") {
+            Button("Review & Reorder (\(camera.count))") {
                 camera.stopAuto()
                 showGallery = true
             }
             .disabled(camera.count == 0 || camera.busy)
-            Button("重置相机 · 开始新一批") { camera.resetBatch() }
+            Button("New Batch") { camera.resetBatch() }
                 .disabled(camera.busy)
-            Button("清理全部本地照片与 ZIP", role: .destructive) {
+            Button("Clear All Local Data", role: .destructive) {
                 camera.stopAuto()
                 confirmCleanup = true
             }
             .disabled(camera.busy)
-            Text("保存原始方向 JPEG + 内嵌内参 + JSON。预览可能裁剪，照片保留完整画面。")
+            Text("Saves native-orientation JPEGs with embedded intrinsics and JSON. The preview may crop; saved photos keep the full frame.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding()
@@ -530,11 +530,11 @@ struct ContentView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .active { camera.start() } else { camera.stop() }
         }
-        .alert("清理全部本地存储？", isPresented: $confirmCleanup) {
-            Button("取消", role: .cancel) {}
-            Button("删除全部", role: .destructive) { camera.resetBatch(clearLocalStorage: true) }
+        .alert("Clear all local data?", isPresented: $confirmCleanup) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete All", role: .destructive) { camera.resetBatch(clearLocalStorage: true) }
         } message: {
-            Text("将永久删除本 App 内当前及历史批次的照片、配套内参和已生成 ZIP，无法撤销。请先导出需要保留的照片。已发送到电脑或另存到其他位置的文件不受影响。")
+            Text("This permanently deletes all current and previous batches, intrinsics, and ZIP exports stored in this app. Export anything you want to keep first. Files already sent to your computer or saved elsewhere are unaffected.")
         }
         .sheet(isPresented: $showGallery) { PhotoGallery(camera: camera) }
         .sheet(item: $camera.archive) { item in ArchiveShare(url: item.url) }
@@ -581,9 +581,9 @@ struct PhotoGallery: View {
                                 SavedPhotoImage(url: photo.url)
                                     .frame(width: 110, height: 84)
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text("第 \((camera.photos.firstIndex(where: { $0.id == photo.id }) ?? 0) + 1) 张")
+                                    Text("Photo \((camera.photos.firstIndex(where: { $0.id == photo.id }) ?? 0) + 1)")
                                         .font(.headline)
-                                    Text("原拍摄编号 \(photo.id) · 点击放大")
+                                    Text("Capture \(photo.id) · Tap to enlarge")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
@@ -594,9 +594,9 @@ struct PhotoGallery: View {
                     .onMove(perform: camera.movePhotos)
                     .onDelete(perform: camera.deletePhotos)
                 } header: {
-                    Text("点击左侧减号删除；按住右侧 ≡ 排序；点击照片预览")
+                    Text("Tap minus to delete, drag the handle to reorder, or tap a photo to preview.")
                 } footer: {
-                    Text("完成后回到相机打包，文件夹按此顺序编号。内参与照片始终配套；原拍摄编号保留在元数据中。")
+                    Text("Return to the camera to export. Folders follow this order. Photos stay paired with their intrinsics, and metadata retains the original capture IDs.")
                 }
             }
             .disabled(camera.busy)
@@ -604,16 +604,16 @@ struct PhotoGallery: View {
                 Text(camera.status).font(.footnote).padding().frame(maxWidth: .infinity).background(.regularMaterial)
             }
             .environment(\.editMode, .constant(.active))
-            .navigationTitle("已拍照片")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .navigationTitle("Saved Photos")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(item: $selected) { photo in
                 NavigationStack {
                     SavedPhotoImage(url: photo.url, maxSize: 2400)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color.black)
-                        .navigationTitle("原拍摄编号 \(photo.id)")
+                        .navigationTitle("Capture \(photo.id)")
                         .navigationBarTitleDisplayMode(.inline)
-                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { selected = nil } } }
+                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Close") { selected = nil } } }
                 }
             }
         }

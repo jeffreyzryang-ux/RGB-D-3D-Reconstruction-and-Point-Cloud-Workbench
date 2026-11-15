@@ -2,7 +2,7 @@
 
 An iPhone capture app for saving ARKit camera frames together with their per-frame camera intrinsics and, on supported devices, LiDAR scene depth. It provides manual capture, timed capture, photo review and ordering, and ZIP export through the iOS share sheet.
 
-The app is written in Swift and SwiftUI using Apple frameworks, with no third-party package dependencies. Its current interface is in Chinese. It collects data for computer-vision and reconstruction workflows; reconstruction itself runs separately in the [RGB-D Point Cloud Workbench](../README.md).
+The app is written in Swift and SwiftUI using Apple frameworks, with no third-party package dependencies. Its interface is in English. System-provided dialogs and the share sheet follow the device language. It collects data for computer-vision and reconstruction workflows; reconstruction itself runs separately in the [RGB-D Point Cloud Workbench](../README.md).
 
 ## Features
 
@@ -32,10 +32,10 @@ The project contains a project-level iOS 16.0 setting, but the application targe
 
 1. Open the app and wait approximately two seconds for warm-up. Autofocus remains enabled; this delay does not lock or guarantee focus.
 2. Check the RGB resolution at the top of the preview and the LiDAR status below it.
-3. Tap the camera button for one capture, or **Every 2 Seconds** (`每 2 秒连拍`) for timed capture.
-4. Tap **Saved Photos · Preview and Order** (`已拍照片 · 预览与排序`) to review the batch. This stops timed capture.
+3. Tap the camera button for one capture, or **Auto · 2 sec** for timed capture.
+4. Tap **Review & Reorder** to review the batch. This stops timed capture.
 5. Tap a thumbnail to enlarge it, drag the reorder handle to change export order, or use the delete control to remove a capture and its associated files.
-6. Return to the camera view and tap **Package and Share** (`打包分享`). Export also stops timed capture.
+6. Return to the camera view and tap **Export ZIP**. Export also stops timed capture.
 7. Use AirDrop to send the ZIP to your Mac, or choose **Save to Files**.
 
 Only one save is allowed at a time. If a save is still running when the timer fires, that trigger is skipped rather than queued. A capture also rejects a frame older than 0.5 seconds or the same frame timestamp as the preceding save attempt.
@@ -208,11 +208,11 @@ Documents/
 
 A serial writer queue manages storage. Each capture is written into a staging directory and committed by renaming it into the batch only after saving succeeds. Before committing, the app reads the JPEG back and verifies its embedded JSON and dimensions.
 
-**Reset Camera · Start New Batch** (`重置相机 · 开始新一批`) clears the displayed count and share reference, resets numbering, and selects a new batch directory. It preserves older batches on disk. Restarting the app process also creates a new batch; going to the background and returning within the same process continues the current batch, with timed capture stopped.
+**New Batch** clears the displayed count and share reference, resets numbering, and selects a new batch directory. It preserves older batches on disk. Restarting the app process also creates a new batch; going to the background and returning within the same process continues the current batch, with timed capture stopped.
 
 There is currently no history browser or export entry for older batches. Export the current batch before resetting or closing the app process if you need access through the interface. Every export creates a new ZIP, and older ZIPs remain stored. Uninstalling the app removes its local data.
 
-**Clear All Local Photos and ZIPs** (`清理全部本地照片与 ZIP`) asks for confirmation, then deletes current and historical capture storage, legacy `Captures` and `Exports` directories, and pending data owned by this workflow. It starts a fresh batch afterward. This is permanent; files already transferred to a computer or saved elsewhere are unaffected.
+**Clear All Local Data** asks for confirmation, then deletes current and historical capture storage, legacy `Captures` and `Exports` directories, and pending data owned by this workflow. It starts a fresh batch afterward. This is permanent; files already transferred to a computer or saved elsewhere are unaffected.
 
 ## Project Structure
 
