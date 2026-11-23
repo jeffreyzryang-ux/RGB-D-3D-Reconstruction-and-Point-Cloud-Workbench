@@ -3,6 +3,7 @@
 
 import asyncio, contextlib, hashlib, json, os, queue, shutil, signal, sqlite3, stat, subprocess, sys, threading, time, uuid, zipfile
 from pathlib import Path, PurePosixPath
+from typing import Literal
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -49,6 +50,8 @@ with connect() as c:
     c.execute(
         'create table if not exists jobs(id text primary key,project_id text,status text,stage text,created real,updated real,error text,small integer,source text,results text default "[]")'
     )
+    if "pcl_stddev" not in {r["name"] for r in c.execute("pragma table_info(jobs)")}:
+        c.execute("alter table jobs add column pcl_stddev real")
 
 
 def row(job):
@@ -235,6 +238,17 @@ def source_root(upload):
     raise ValueError("无法识别批次根目录，请上传完整拍摄文件夹")
 
 
+def capture_source(job):
+    """Resolve uploads after moving a workbench, including versions sharing inputs."""
+    stored = Path(job["source"])
+    for parent in stored.parents:
+        if parent.name == "upload" and parent.parent.parent.name == "jobs":
+            local = jobdir(parent.parent.name) / "upload" / stored.relative_to(parent)
+            if local.is_dir():
+                return local
+    return stored
+
+
 def execute(job, stage, script, args):
     # 运行算法子进程并写入日志；轮询取消信号，必要时终止整个进程组。
     if STOP.is_set() or row(job)["status"] == "cancelling":
@@ -276,7 +290,7 @@ def process(job):
             raise InterruptedError()
         update(job, status="running", stage="validating")
     base = jobdir(job)
-    src = Path(j["source"])
+    src = capture_source(j)
     (base / "code").mkdir(exist_ok=True)
     for filename in [
         "reconstruct_captures.py",
@@ -284,6 +298,7 @@ def process(job):
         "fuse_lidar_depth.py",
         "audit_capture_result.py",
         "dense_cpu.py",
+        "clean_point_cloud.py",
     ]:
         shutil.copy2(ROOT / "scripts" / filename, base / "code" / filename)
     shutil.copy2(ROOT / "requirements.web.lock.txt", base / "requirements.lock.txt")
@@ -294,6 +309,7 @@ def process(job):
                 voxel_m=0.005,
                 clarity_warning_below=45,
                 small_batch=bool(j["small"]),
+                pcl_stddev=j["pcl_stddev"],
                 source=str(src),
                 scripts={
                     f.name: hashlib.sha256(f.read_bytes()).hexdigest()
@@ -358,6 +374,12 @@ def process(job):
             ply(target / "preview.ply", x[::step], rgb[::step])
             r["bounds"] = [x.min(0).tolist(), x.max(0).tolist()]
             results.append(r)
+            if j["pcl_stddev"] is not None:
+                threshold = j["pcl_stddev"]
+                execute(job, "pcl_cleaning", "clean_point_cloud.py", [
+                    target / "multiview-supported.ply", target / f"pcl-sor-{threshold}",
+                    "--stddev", threshold, "--binary", ROOT / "build/pcl_sor/pcl_sor",
+                ])
         except InterruptedError:
             raise
         except Exception as e:
@@ -472,7 +494,11 @@ class Project(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
 
-class UploadConfig(BaseModel):
+class CleaningConfig(BaseModel):
+    pcl_stddev: Literal[1.5, 2.0] | None = None
+
+
+class UploadConfig(CleaningConfig):
     small: bool = False
 
 
@@ -494,18 +520,51 @@ def create_project(p: Project):
     return dict(id=pid, name=p.name)
 
 
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str):
+    # Delete the whole project because retries share the original capture data.
+    with LOCK, connect() as c:
+        if not c.execute("select id from projects where id=?", (pid,)).fetchone():
+            raise HTTPException(404, "Project not found.")
+        versions = c.execute(
+            "select id,status from jobs where project_id=?", (pid,)
+        ).fetchall()
+        if any(j["status"] not in TERMINAL or j["id"] in PROCS for j in versions):
+            raise HTTPException(409, "Wait for active uploads or reconstruction jobs to finish before deleting this model.")
+        # Stage directories first; restore them if a filesystem or database step fails.
+        staged = []
+        try:
+            for j in versions:
+                original = jobdir(j["id"])
+                if original.exists():
+                    removed = original.with_name("deleted-" + uuid.uuid4().hex)
+                    original.rename(removed)
+                    staged.append((original, removed))
+            c.execute("delete from jobs where project_id=?", (pid,))
+            c.execute("delete from projects where id=?", (pid,))
+            c.commit()
+        except Exception:
+            c.rollback()
+            for original, removed in reversed(staged):
+                removed.rename(original)
+            raise
+        for _, removed in staged:
+            shutil.rmtree(removed)
+    return {"deleted": True}
+
+
 @app.post("/api/projects/{pid}/uploads")
 def create_upload(pid: str, cfg: UploadConfig):
     # 创建上传中的任务及目录，保存是否启用小批量诊断。
-    with connect() as c:
+    with LOCK, connect() as c:
         if not c.execute("select id from projects where id=?", (pid,)).fetchone():
             raise HTTPException(404, "项目不存在")
         jid = uuid.uuid4().hex
         now = time.time()
         (jobdir(jid) / "upload").mkdir(parents=True)
         c.execute(
-            "insert into jobs(id,project_id,status,stage,created,updated,small) values(?,?,?,?,?,?,?)",
-            (jid, pid, "uploading", "uploading", now, now, cfg.small),
+            "insert into jobs(id,project_id,status,stage,created,updated,small,pcl_stddev) values(?,?,?,?,?,?,?,?)",
+            (jid, pid, "uploading", "uploading", now, now, cfg.small, cfg.pcl_stddev),
         )
     return dict(id=jid)
 
@@ -634,6 +693,19 @@ def get_job(job: str):
     # 返回任务状态、模型信息与末尾日志，供前端轮询。
     j = row(job)
     j["models"] = json.loads(j.pop("results"))
+    for model in j["models"]:
+        folder = jobdir(job) / f"model-{model['model_id']}"
+        variants = []
+        for threshold in (2.0, 1.5):
+            subdir = f"pcl-sor-{threshold}"
+            report = folder / subdir / "report.json"
+            if report.is_file():
+                counts = json.loads(report.read_text())
+                for name, key in (("cleaned", "kept_points"), ("removed", "removed_points")):
+                    if (report.parent / f"{name}.ply").is_file():
+                        variants.append(dict(path=f"{subdir}/{name}", points=counts[key],
+                                             label=f"PCL {name} (σ = {threshold})"))
+        model["pcl_variants"] = variants
     log = jobdir(job) / "execution.log"
     j["log"] = log.read_text(errors="replace")[-6000:] if log.exists() else ""
     return j
@@ -652,30 +724,32 @@ def cancel(job: str):
 
 
 @app.post("/api/jobs/{job}/retry")
-def retry(job: str):
+def retry(job: str, cfg: CleaningConfig | None = None):
     # 以原始输入创建新的任务版本，保留旧版本结果。
-    old = row(job)
-    if old["status"] not in TERMINAL or not old["source"]:
-        raise HTTPException(409, "只能重试已结束的任务")
-    jid = uuid.uuid4().hex
-    jobdir(jid).mkdir(parents=True)
-    now = time.time()
-    with connect() as c:
-        c.execute(
-            "insert into jobs(id,project_id,status,stage,created,updated,small,source) values(?,?,?,?,?,?,?,?)",
-            (
-                jid,
-                old["project_id"],
-                "queued",
-                "queued",
-                now,
-                now,
-                old["small"],
-                old["source"],
-            ),
-        )
-    Q.put(jid)
-    return dict(id=jid)
+    with LOCK:
+        old = row(job)
+        if old["status"] not in TERMINAL or not old["source"]:
+            raise HTTPException(409, "只能重试已结束的任务")
+        jid = uuid.uuid4().hex
+        jobdir(jid).mkdir(parents=True)
+        now = time.time()
+        with connect() as c:
+            c.execute(
+                "insert into jobs(id,project_id,status,stage,created,updated,small,source,pcl_stddev) values(?,?,?,?,?,?,?,?,?)",
+                (
+                    jid,
+                    old["project_id"],
+                    "queued",
+                    "queued",
+                    now,
+                    now,
+                    old["small"],
+                    str(capture_source(old)),
+                    old["pcl_stddev"] if cfg is None else cfg.pcl_stddev,
+                ),
+            )
+        Q.put(jid)
+        return dict(id=jid)
 
 
 @app.get("/api/jobs/{job}/photos")
@@ -742,7 +816,7 @@ def download_bundle(job: str):
                             and "upload" not in f.relative_to(base).parts
                         ):
                             z.write(f, str(f.relative_to(base)))
-                    source = Path(j["source"])
+                    source = capture_source(j)
                     for f in source.rglob("*"):
                         if f.is_file() and not f.is_symlink():
                             z.write(f, "inputs/" + str(f.relative_to(source)))

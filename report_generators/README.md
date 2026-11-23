@@ -1,22 +1,22 @@
-# 报告生成脚本
+# Historical Report Generators
 
-此目录集中存放报告整理、可视化和归档脚本。几何计算与建模算法保留在 `scripts/`。
+This directory contains scripts for compiling, visualizing, and archiving historical reports. Geometry and reconstruction algorithms remain in `scripts/`.
 
-| 脚本 | 用途 |
-|---|---|
-| report_capture.py | 2026-10-07 拍摄批次报告 |
-| report_calibration_20261008.py | 2026-10-08 标定报告 |
-| report_step1_20261013.py | 2026-10-13 第一阶段报告 |
-| report_step2_20261013.py | 2026-10-13 第二阶段报告 |
+| Script | Purpose |
+| --- | --- |
+| `report_capture.py` | Capture batch report for 2026-10-07 |
+| `report_calibration_20261008.py` | Calibration report for 2026-10-08 |
+| `report_step1_20261013.py` | Stage 1 report for 2026-10-13 |
+| `report_step2_20261013.py` | Stage 2 report for 2026-10-13 |
 
-在 SLAM 根目录使用模块方式运行，例如：
+Run a script as a module from the project root, for example:
 
 ```sh
 .venv/bin/python -m report_generators.report_calibration_20261008
 ```
 
-脚本依赖各自写明的历史 `data/` 批次及清单中的源文件路径；当前复制的工作台未包含这些历史输入，所以不能直接生成这些报告。导入模块也会执行报告生成，请勿把它们当作无副作用的库导入。
+These scripts require the historical `data/` batches and source paths specified in each script. The copied workbench does not include those original inputs, so the reports cannot be regenerated without supplying them. Importing these modules also runs report generation; do not treat them as libraries without side effects.
 
-生成的报告仍写入根目录的 `reports/`，与本目录的源代码分开。输出目录已存在时拒绝覆盖。
+Generated reports are written to the root-level `reports/` directory, separately from the source scripts. The scripts refuse to overwrite an existing output directory.
 
-网页建模流程不调用这些历史报告脚本。`scripts/audit_capture_result.py` 是运行时重建检查，仍由后端调用，因此保留在算法目录；算法产生的 report.json 也保留在各任务结果目录。
+The web reconstruction workflow does not call these historical report generators. The backend still calls `scripts/audit_capture_result.py` for reconstruction checks. Algorithm-generated `report.json` files remain in their respective job result directories.

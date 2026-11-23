@@ -4,6 +4,7 @@
 import json, argparse
 from pathlib import Path
 import numpy as np, cv2, pycolmap as pc
+from clean_point_cloud import DEFAULT_BINARY, clean
 from dense_cpu import ply
 from reconstruct_captures import save
 
@@ -244,5 +245,12 @@ if __name__ == "__main__":
     p.add_argument("sfm", type=Path)
     p.add_argument("output", type=Path)
     p.add_argument("--model-id", type=int, default=0)
+    p.add_argument("--pcl-clean", action="store_true", help="Filter multiview-supported.ply after fusion")
+    p.add_argument("--mean-k", type=int, default=30)
+    p.add_argument("--stddev", type=float, default=2.0)
     a = p.parse_args()
+    if a.pcl_clean and not DEFAULT_BINARY.is_file():
+        p.error(f'Build the PCL cleaner first: {DEFAULT_BINARY}')
     run(a.source, a.sfm, a.output, a.model_id)
+    if a.pcl_clean:
+        clean(a.output / "multiview-supported.ply", a.output / "pcl-sor", a.mean_k, a.stddev)
