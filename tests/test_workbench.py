@@ -33,6 +33,48 @@ class WorkbenchTests(unittest.TestCase):
   self.assertEqual(r.json()['status'],'cancelled')
   r=self.client.put(f'/api/uploads/{j}/file',data={'path':'1/image.jpg'},files={'file':('image.jpg',b'a')},headers=HEAD)
   self.assertEqual(r.status_code,409)
+ def test_delete_project_and_all_shared_versions(self):
+  from backend.app import row, update, jobdir, connect
+  first = self.batch()
+  project = row(first)['project_id']
+  source = jobdir(first) / 'upload'
+  (source / 'capture.txt').write_text('fixture')
+  update(first, status='succeeded', source=str(source))
+  second = self.client.post(f'/api/jobs/{first}/retry', headers=HEAD).json()['id']
+  self.assertEqual(self.client.delete(f'/api/projects/{project}', headers=HEAD).status_code, 409)
+  update(second, status='succeeded')
+  unrelated = self.batch()
+  self.assertEqual(self.client.delete(f'/api/projects/{project}').status_code, 403)
+  self.assertEqual(self.client.delete(f'/api/projects/{project}', headers=HEAD).status_code, 200)
+  for job in [first, second]:
+   self.assertFalse(jobdir(job).exists())
+   self.assertEqual(self.client.get(f'/api/jobs/{job}').status_code, 404)
+  self.assertTrue(jobdir(unrelated).exists())
+  self.assertEqual(self.client.get(f'/api/jobs/{unrelated}').status_code, 200)
+  self.assertEqual(self.client.delete(f'/api/projects/{project}', headers=HEAD).status_code, 404)
+
+ def test_delete_restores_files_when_staging_fails(self):
+  from unittest.mock import patch
+  from backend.app import row, update, jobdir
+  first = self.batch()
+  project = row(first)['project_id']
+  update(first, status='succeeded', source=str(jobdir(first) / 'upload'))
+  second = self.client.post(f'/api/jobs/{first}/retry', headers=HEAD).json()['id']
+  update(second, status='succeeded')
+  original_rename = Path.rename
+  calls = []
+  def fail_second(path, target):
+   calls.append(path)
+   if len(calls) == 2:
+    raise OSError('Simulated storage failure')
+   return original_rename(path, target)
+  with patch.object(Path, 'rename', fail_second):
+   with self.assertRaises(OSError):
+    self.client.delete(f'/api/projects/{project}', headers=HEAD)
+  for job in [first, second]:
+   self.assertTrue(jobdir(job).exists())
+   self.assertEqual(self.client.get(f'/api/jobs/{job}').status_code, 200)
+
  @unittest.skipUnless(FIXTURE.is_dir(), '需要 Captures4 测试数据或 SLAM_TEST_CAPTURES')
  def test_valid_dataset(self):self.assertEqual(validate_source(FIXTURE),12)
 if __name__=='__main__':unittest.main()

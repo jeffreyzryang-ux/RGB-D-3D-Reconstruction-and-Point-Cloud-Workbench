@@ -8,6 +8,7 @@ import "./style.css";
 type Project = { id: string; name: string };
 type Model = {
   model_id: number;
+  pcl_variants?: { path: string; points: number; label: string }[];
   fused_points: number;
   registered: number;
   total: number;
@@ -22,6 +23,7 @@ type Job = {
   updated: number;
   error: string;
   models: Model[];
+  pcl_stddev?: number | null;
   log: string;
 };
 type Photo = {
@@ -38,6 +40,7 @@ const labels: Record<string, string> = {
   validating: "Validating captures",
   preprocessing: "Processing depth",
   sfm: "Camera reconstruction",
+  pcl_cleaning: "Cleaning point cloud",
   depth_fusion: "Scaling and fusing depth",
   exporting: "Exporting and checking",
   complete: "Processing complete",
@@ -86,13 +89,14 @@ function App() {
   const [newProject, setNewProject] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [name, setName] = useState("");
+  const [cleaning, setCleaning] = useState("2.0");
   const [small, setSmall] = useState(false);
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
   const [model, setModel] = useState(0);
-  const [variant, setVariant] = useState("fused");
+  const [variant, setVariant] = useState("");
   const [tab, setTab] = useState("rgb");
   const [photo, setPhoto] = useState("1");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -176,7 +180,7 @@ function App() {
       });
       const j = await api(`/projects/${p.id}/uploads`, {
         method: "POST",
-        body: JSON.stringify({ small }),
+        body: JSON.stringify({ small, pcl_stddev: Number(cleaning) || null }),
       });
       id = j.id;
       setPid(p.id);
@@ -220,7 +224,7 @@ function App() {
   }
   async function retry() {
     try {
-      const j = await api(`/jobs/${jid}/retry`, { method: "POST" });
+      const j = await api(`/jobs/${jid}/retry`, { method: "POST", body: JSON.stringify({ pcl_stddev: Number(cleaning) || null }) });
       setJid(j.id);
       setJobs(await api(`/projects/${pid}/jobs`));
     } catch (e) {
@@ -256,7 +260,31 @@ function App() {
   }
 
   // Derived values used by the result panels.
-  const m = job?.models?.find((m) => m.model_id === model) || job?.models?.[0];
+  const models = job?.id === jid ? job.models : [];
+  const m = models.find((item) => item.model_id === model) || models[0];
+  const variants = m ? [
+    { path: "fused", points: m.fused_points, label: "Main point cloud" },
+    { path: "multiview-supported", points: m.multiview_supported_fused_points, label: "Cross-view supported cloud" },
+    ...(m.pcl_variants || []),
+  ] : [];
+  const selected = variants.find(v => v.path === variant) ||
+    variants.find(v => v.path.endsWith("/cleaned")) || variants[0];
+  useEffect(() => setVariant(""), [jid, model]);
+  const cleaningControl = (
+    <label>PCL cleaning
+      <select value={cleaning} onChange={e => {
+        const value = e.target.value;
+        setCleaning(value);
+        if (newProject || !m) return;
+        const path = value ? `pcl-sor-${value}/cleaned` : "multiview-supported";
+        if (variants.some(v => v.path === path)) setVariant(path);
+      }} disabled={busy}>
+        <option value="2.0">Standard (σ = 2.0)</option>
+        <option value="1.5">Stronger (σ = 1.5)</option>
+        <option value="">Off</option>
+      </select>
+    </label>
+  );
   const artifact = (path: string) => `/api/jobs/${jid}/artifacts/${path}`;
   const activeProject = projects.find((p) => p.id === pid);
   const isUpload = newProject || !projects.length;
@@ -266,6 +294,7 @@ function App() {
     "preprocessing",
     "sfm",
     "depth_fusion",
+    ...(job?.pcl_stddev ? ["pcl_cleaning"] : []),
     "exporting",
   ];
   return (
@@ -454,6 +483,7 @@ function App() {
                         ))}
                       </ul>
                     </details>
+                    {cleaningControl}
                     <label className="small-check">
                       <input
                         type="checkbox"
@@ -524,12 +554,12 @@ function App() {
                   ))}
                 </select>
                 {job && terminal.includes(job.status) && (
-                  <button onClick={retry}>Reconstruct again</button>
+                  <>{cleaningControl}<button onClick={retry}>Reconstruct again</button></>
                 )}
                 {m && (
                   <a
                     className="button primary"
-                    href={artifact(`model-${m.model_id}/${variant}.ply`)}
+                    href={artifact(`model-${m.model_id}/${selected.path}.ply`)}
                   >
                     ↓ Export PLY
                   </a>
@@ -609,8 +639,11 @@ function App() {
                   )}
                 </aside>
                 <Viewer
-                  url={artifact(`model-${m.model_id}/${variant}.ply`)}
-                  previewUrl={artifact(`model-${m.model_id}/preview.ply`)}
+                  url={artifact(`model-${m.model_id}/${selected.path}.ply`)}
+                  previewUrl={artifact(`model-${m.model_id}/${selected.path === "fused" ? "preview" : selected.path}.ply`)}
+                  removedUrl={selected.path.endsWith("/cleaned")
+                    ? artifact(`model-${m.model_id}/${selected.path.replace(/cleaned$/, "removed")}.ply`)
+                    : undefined}
                   cameraUrl={artifact(
                     `model-${m.model_id}/cameras-meters.json`,
                   )}
@@ -620,10 +653,7 @@ function App() {
                   <div className="stat">
                     <span>Point count</span>
                     <strong>
-                      {(variant === "fused"
-                        ? m.fused_points
-                        : m.multiview_supported_fused_points
-                      ).toLocaleString()}
+                      {selected.points.toLocaleString()}
                     </strong>
                     <small>Colored points from measured depth</small>
                   </div>
@@ -659,13 +689,10 @@ function App() {
                   <label>
                     Point cloud variant
                     <select
-                      value={variant}
+                      value={selected.path}
                       onChange={(e) => setVariant(e.target.value)}
                     >
-                      <option value="fused">Main point cloud</option>
-                      <option value="multiview-supported">
-                        Cross-view supported cloud
-                      </option>
+                      {variants.map(v => <option value={v.path} key={v.path}>{v.label}</option>)}
                     </select>
                   </label>
                   <hr />

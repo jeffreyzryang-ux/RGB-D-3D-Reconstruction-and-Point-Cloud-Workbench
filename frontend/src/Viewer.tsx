@@ -9,10 +9,12 @@ type CameraData = { photo: string; center_m: number[]; Rcw: number[][] };
 export default function Viewer({
   url,
   previewUrl,
+  removedUrl,
   cameraUrl,
 }: {
   url: string;
   previewUrl: string;
+  removedUrl?: string;
   cameraUrl: string;
 }) {
   // Mutable Three.js handles and UI controls.
@@ -27,6 +29,12 @@ export default function Viewer({
   const [showCameras, setShowCameras] = useState(false);
   const [measure, setMeasure] = useState(false);
   const [distance, setDistance] = useState<number | null>(null);
+
+  const [highlight, setHighlight] = useState(false);
+  const [overlayStatus, setOverlayStatus] = useState("");
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const viewpoint = useRef<{ model: string; position: THREE.Vector3; up: THREE.Vector3;
+    target: THREE.Vector3; near: number; far: number; radius: number } | null>(null);
 
   // Synchronize React controls with the active Three.js scene.
   useEffect(() => {
@@ -59,12 +67,24 @@ export default function Viewer({
     renderer.setClearColor("#151b24");
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
+    sceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(48, 1, 0.001, 1000);
     camera.up.set(0, -1, 0);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     let cloud: THREE.Points | null = null;
-    let radius = 1;
+    const previous = viewpoint.current;
+    const keepView = previous?.model === cameraUrl;
+    let radius = keepView ? previous.radius : 1;
+    if (keepView) {
+      camera.position.copy(previous.position);
+      camera.up.copy(previous.up);
+      camera.near = previous.near;
+      camera.far = previous.far;
+      controls.target.copy(previous.target);
+      camera.updateProjectionMatrix();
+      controls.update();
+    }
     let reference: CameraData | null = null;
     const marks = new THREE.Group();
     scene.add(marks);
@@ -137,7 +157,7 @@ export default function Viewer({
       material.current = mat;
       cloud = new THREE.Points(geo, mat);
       scene.add(cloud);
-      fit();
+      if (!keepView) fit();
       setStatus(
         `${geo.getAttribute("position").count.toLocaleString()} points · ${final ? "Full model" : "Quick preview"}`,
       );
@@ -153,7 +173,7 @@ export default function Viewer({
         reference =
           [...data].sort((a, b) => Number(a.photo) - Number(b.photo))[0] ||
           null;
-        fit();
+        if (!keepView) fit();
         for (const c of data) {
           const center = new THREE.Vector3(
             ...(c.center_m as [number, number, number]),
@@ -254,6 +274,9 @@ export default function Viewer({
 
     // Release event listeners, GPU resources, and animation callbacks.
     return () => {
+      if (cloud) viewpoint.current = { model: cameraUrl, position: camera.position.clone(),
+        up: camera.up.clone(), target: controls.target.clone(), near: camera.near, far: camera.far, radius };
+      sceneRef.current = null;
       disposed = true;
       cancelAnimationFrame(frame);
       resize.disconnect();
@@ -268,11 +291,43 @@ export default function Viewer({
       geometries.forEach((g) => g.dispose());
       mats.forEach((m) => m.dispose());
       renderer.dispose();
+      renderer.forceContextLoss();
       renderer.domElement.remove();
       material.current = null;
       cameraGroup.current = null;
     };
   }, [url, previewUrl, cameraUrl]);
+  useEffect(() => {
+    const scene = sceneRef.current;
+    setOverlayStatus("");
+    if (!highlight || !removedUrl || !scene) return;
+    const controller = new AbortController();
+    let overlay: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | undefined;
+    setOverlayStatus("Loading removed points…");
+    (async () => {
+      try {
+        const response = await fetch(removedUrl, { signal: controller.signal });
+        if (!response.ok) throw new Error("Could not load removed points");
+        const bytes = await response.arrayBuffer();
+        if (controller.signal.aborted) return;
+        const geo = new PLYLoader().parse(bytes);
+        const mat = new THREE.PointsMaterial({ color: 0xff3856, size: 3, sizeAttenuation: false });
+        overlay = new THREE.Points(geo, mat);
+        scene.add(overlay);
+        setOverlayStatus(`${geo.getAttribute("position").count.toLocaleString()} removed points in red`);
+      } catch (error) {
+        if (!controller.signal.aborted) setOverlayStatus(String(error));
+      }
+    })();
+    return () => {
+      controller.abort();
+      if (overlay) {
+        scene.remove(overlay);
+        overlay.geometry.dispose();
+        overlay.material.dispose();
+      }
+    };
+  }, [highlight, removedUrl, url, previewUrl, cameraUrl]);
   return (
     <div className="viewer">
       <div
@@ -282,11 +337,14 @@ export default function Viewer({
       />
       <div className="canvas-top">
         <span className="live-dot" />
-        {status}
+        {status}{overlayStatus && ` · ${overlayStatus}`}
         <span className="unit">Meters · LiDAR scale</span>
       </div>
       <div className="viewer-tools">
         <button onClick={() => reset.current()}>Fit view</button>
+        {removedUrl && <button aria-pressed={highlight} onClick={() => setHighlight(!highlight)}>
+          Highlight removed
+        </button>}
         <button
           aria-pressed={showCameras}
           onClick={() => setShowCameras(!showCameras)}
