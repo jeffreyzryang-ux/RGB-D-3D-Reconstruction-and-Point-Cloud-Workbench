@@ -24,6 +24,8 @@ type Job = {
   error: string;
   models: Model[];
   pcl_stddev?: number | null;
+  estimate_normals?: boolean;
+  poisson_mesh?: boolean;
   log: string;
 };
 type Photo = {
@@ -40,6 +42,8 @@ const labels: Record<string, string> = {
   validating: "Validating captures",
   preprocessing: "Processing depth",
   sfm: "Camera reconstruction",
+  poisson_surface: "Reconstructing Poisson surface",
+  normal_estimation: "Estimating and orienting normals",
   pcl_cleaning: "Cleaning point cloud",
   depth_fusion: "Scaling and fusing depth",
   exporting: "Exporting and checking",
@@ -78,6 +82,14 @@ async function api(path: string, options: RequestInit = {}) {
   return r.json();
 }
 
+async function checkMeshSupport(requestMesh: boolean) {
+  if (!requestMesh) return;
+  const response = await fetch("/openapi.json");
+  const schema = await response.json();
+  if (!schema.components?.schemas?.CleaningConfig?.properties?.poisson_mesh)
+    throw new Error("Restart the workbench server to generate a new Poisson surface.");
+}
+
 function App() {
   // Project selection, job results, and upload form state.
   const [projects, setProjects] = useState<Project[]>([]);
@@ -89,6 +101,8 @@ function App() {
   const [newProject, setNewProject] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [name, setName] = useState("");
+  const [poisson, setPoisson] = useState(false);
+  const [estimateNormals, setEstimateNormals] = useState(true);
   const [cleaning, setCleaning] = useState("2.0");
   const [small, setSmall] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -174,13 +188,14 @@ function App() {
     setError("");
     let id = "";
     try {
+      await checkMeshSupport(poisson);
       const p = await api("/projects", {
         method: "POST",
         body: JSON.stringify({ name }),
       });
       const j = await api(`/projects/${p.id}/uploads`, {
         method: "POST",
-        body: JSON.stringify({ small, pcl_stddev: Number(cleaning) || null }),
+        body: JSON.stringify({ small, poisson_mesh: poisson, estimate_normals: estimateNormals || poisson, pcl_stddev: Number(cleaning) || null }),
       });
       id = j.id;
       setPid(p.id);
@@ -224,7 +239,8 @@ function App() {
   }
   async function retry() {
     try {
-      const j = await api(`/jobs/${jid}/retry`, { method: "POST", body: JSON.stringify({ pcl_stddev: Number(cleaning) || null }) });
+      await checkMeshSupport(poisson);
+      const j = await api(`/jobs/${jid}/retry`, { method: "POST", body: JSON.stringify({ poisson_mesh: poisson, estimate_normals: estimateNormals || poisson, pcl_stddev: Number(cleaning) || null }) });
       setJid(j.id);
       setJobs(await api(`/projects/${pid}/jobs`));
     } catch (e) {
@@ -262,14 +278,39 @@ function App() {
   // Derived values used by the result panels.
   const models = job?.id === jid ? job.models : [];
   const m = models.find((item) => item.model_id === model) || models[0];
+  // Older running workers can already serve mesh artifacts before their next restart.
+  const modelKey = m ? `${jid}/artifacts/model-${m.model_id}` : "";
+  const probeMesh = Boolean(m?.pcl_variants?.some(v => v.path === "pcl-normals/normals")
+    && !m.pcl_variants.some(v => v.path === "poisson/mesh"));
+  const [existingMesh, setExistingMesh] = useState<{ key: string; vertices: number } | null>(null);
+  useEffect(() => {
+    if (!modelKey || !probeMesh) return;
+    const request = new AbortController();
+    fetch(`/api/jobs/${modelKey}/poisson/report.json`, { signal: request.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(report => {
+        if (!request.signal.aborted && report?.faces > 0 && report.vertices > 0)
+          setExistingMesh({ key: modelKey, vertices: report.vertices });
+      }).catch(() => {});
+    return () => request.abort();
+  }, [modelKey, probeMesh]);
   const variants = m ? [
     { path: "fused", points: m.fused_points, label: "Main point cloud" },
     { path: "multiview-supported", points: m.multiview_supported_fused_points, label: "Cross-view supported cloud" },
     ...(m.pcl_variants || []),
+    ...(probeMesh && existingMesh?.key === modelKey ? [
+      { path: "poisson/mesh", points: existingMesh.vertices, label: "Poisson surface" },
+    ] : []),
   ] : [];
   const selected = variants.find(v => v.path === variant) ||
+    variants.find(v => v.path === "poisson/mesh") ||
+    variants.find(v => v.path === "pcl-normals/normals") ||
     variants.find(v => v.path.endsWith("/cleaned")) || variants[0];
   useEffect(() => setVariant(""), [jid, model]);
+  const normalControl = <label className="small-check"><input type="checkbox" checked={estimateNormals || poisson}
+    disabled={busy || poisson} onChange={e => setEstimateNormals(e.target.checked)} /> Estimate normals</label>;
+  const meshControl = <label className="small-check"><input type="checkbox" checked={poisson}
+    disabled={busy} onChange={e => setPoisson(e.target.checked)} /> Poisson surface</label>;
   const cleaningControl = (
     <label>PCL cleaning
       <select value={cleaning} onChange={e => {
@@ -285,6 +326,18 @@ function App() {
       </select>
     </label>
   );
+  const pointView = variants.find(v => v.path === `pcl-sor-${cleaning}/cleaned`)?.path || "multiview-supported";
+  const displayControls = m && [
+    { path: "pcl-normals/normals", label: "Normal colors" },
+    { path: "poisson/mesh", label: "Poisson surface" },
+  ].map(({path, label}) => {
+    const available = variants.some(v => v.path === path);
+    return <label key={path} className="small-check">
+      <input type="checkbox" disabled={!available} checked={selected.path === path}
+        onChange={e => setVariant(e.target.checked ? path : pointView)} />
+      {label}{!available && " (not generated)"}
+    </label>;
+  });
   const artifact = (path: string) => `/api/jobs/${jid}/artifacts/${path}`;
   const activeProject = projects.find((p) => p.id === pid);
   const isUpload = newProject || !projects.length;
@@ -295,6 +348,8 @@ function App() {
     "sfm",
     "depth_fusion",
     ...(job?.pcl_stddev ? ["pcl_cleaning"] : []),
+    ...(job?.estimate_normals ? ["normal_estimation"] : []),
+    ...(job?.poisson_mesh ? ["poisson_surface"] : []),
     "exporting",
   ];
   return (
@@ -483,7 +538,7 @@ function App() {
                         ))}
                       </ul>
                     </details>
-                    {cleaningControl}
+                    {cleaningControl}{normalControl}{meshControl}
                     <label className="small-check">
                       <input
                         type="checkbox"
@@ -554,7 +609,10 @@ function App() {
                   ))}
                 </select>
                 {job && terminal.includes(job.status) && (
-                  <>{cleaningControl}<button onClick={retry}>Reconstruct again</button></>
+                  <>{displayControls}<details>
+                    <summary>Reconstruction settings</summary>
+                    {cleaningControl}{normalControl}{meshControl}
+                  </details><button onClick={retry}>Reconstruct again</button></>
                 )}
                 {m && (
                   <a
@@ -651,11 +709,13 @@ function App() {
                 <aside className="inspector">
                   <div className="panel-heading">Model overview</div>
                   <div className="stat">
-                    <span>Point count</span>
+                    <span>{selected.path === "poisson/mesh" ? "Mesh vertices" : "Point count"}</span>
                     <strong>
                       {selected.points.toLocaleString()}
                     </strong>
-                    <small>Colored points from measured depth</small>
+                    <small>{selected.path === "poisson/mesh" ? "Poisson surface with sampled RGB colors" :
+                      selected.path === "pcl-normals/normals" ? "RGB encodes the X, Y and Z normal components" :
+                      "Colored points from measured depth"}</small>
                   </div>
                   <div className="stat-row">
                     <div>
@@ -687,7 +747,7 @@ function App() {
                     </select>
                   </label>
                   <label>
-                    Point cloud variant
+                    Model variant
                     <select
                       value={selected.path}
                       onChange={(e) => setVariant(e.target.value)}

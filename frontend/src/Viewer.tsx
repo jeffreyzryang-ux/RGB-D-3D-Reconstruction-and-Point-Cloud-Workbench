@@ -30,6 +30,7 @@ export default function Viewer({
   const [measure, setMeasure] = useState(false);
   const [distance, setDistance] = useState<number | null>(null);
 
+  const [meshVisible, setMeshVisible] = useState(false);
   const [highlight, setHighlight] = useState(false);
   const [overlayStatus, setOverlayStatus] = useState("");
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -52,6 +53,7 @@ export default function Viewer({
     const el = host.current;
     let disposed = false;
     let frame = 0;
+    setMeshVisible(false);
     setDistance(null);
     setStatus("Loading point cloud…");
     let renderer: THREE.WebGLRenderer;
@@ -67,12 +69,16 @@ export default function Viewer({
     renderer.setClearColor("#151b24");
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight(0xffffff, 1.25));
+    const light = new THREE.DirectionalLight(0xffffff, 1.5);
+    light.position.set(2, -4, 3);
+    scene.add(light);
     sceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(48, 1, 0.001, 1000);
     camera.up.set(0, -1, 0);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    let cloud: THREE.Points | null = null;
+    let cloud: THREE.Points | THREE.Mesh | null = null;
     const previous = viewpoint.current;
     const keepView = previous?.model === cameraUrl;
     let radius = keepView ? previous.radius : 1;
@@ -149,17 +155,31 @@ export default function Viewer({
         cloud.geometry.dispose();
         (cloud.material as THREE.Material).dispose();
       }
-      const mat = new THREE.PointsMaterial({
-        size,
-        vertexColors: geo.hasAttribute("color"),
-        sizeAttenuation: false,
-      });
-      material.current = mat;
-      cloud = new THREE.Points(geo, mat);
+      if (geo.index && geo.index.count > 0) {
+        geo.computeVertexNormals();
+        cloud = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+          vertexColors: geo.hasAttribute("color"), side: THREE.DoubleSide, roughness: 1,
+        }));
+        setMeshVisible(true);
+      } else {
+        const normals = geo.getAttribute("normal");
+        if (normals) {
+          const colors = new Float32Array(normals.count * 3);
+          for (let i = 0; i < normals.count; i++) {
+            colors[i * 3] = 0.5 * (1 + normals.getX(i));
+            colors[i * 3 + 1] = 0.5 * (1 + normals.getY(i));
+            colors[i * 3 + 2] = 0.5 * (1 + normals.getZ(i));
+          }
+          geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        }
+        const mat = new THREE.PointsMaterial({ size, vertexColors: geo.hasAttribute("color"), sizeAttenuation: false });
+        material.current = mat;
+        cloud = new THREE.Points(geo, mat);
+      }
       scene.add(cloud);
       if (!keepView) fit();
       setStatus(
-        `${geo.getAttribute("position").count.toLocaleString()} points · ${final ? "Full model" : "Quick preview"}`,
+        `${geo.index ? (geo.index.count / 3).toLocaleString() + " triangles" : geo.getAttribute("position").count.toLocaleString() + " points"} · ${final ? "Full model" : "Quick preview"}`,
       );
     }
     (async () => {
@@ -231,11 +251,12 @@ export default function Viewer({
       );
       ray.params.Points!.threshold = radius * 0.004;
       ray.setFromCamera(mouse, camera);
-      const hit = ray.intersectObject(cloud)[0];
-      if (hit?.index === undefined) return;
+      const hit = ray.intersectObject(cloud, false)[0];
+      if (!hit) return;
       if (picked.length === 2) clearMarks();
-      const pos = cloud.geometry.getAttribute("position");
-      const point = new THREE.Vector3().fromBufferAttribute(pos, hit.index);
+      const point = cloud instanceof THREE.Points && hit.index !== undefined
+        ? new THREE.Vector3().fromBufferAttribute(cloud.geometry.getAttribute("position"), hit.index)
+        : hit.point.clone();
       picked.push(point);
       const ball = new THREE.Mesh(
         new THREE.SphereGeometry(radius * 0.006, 12, 8),
@@ -360,7 +381,7 @@ export default function Viewer({
         >
           Measure distance
         </button>
-        <label>
+        {!meshVisible && <label>
           Point size{" "}
           <input
             aria-label="Point size"
@@ -371,7 +392,7 @@ export default function Viewer({
             value={size}
             onChange={(e) => setSize(+e.target.value)}
           />
-        </label>
+        </label>}
       </div>
       <div className="canvas-bottom">
         {measure

@@ -7,7 +7,12 @@ data/
 独立验证照片/
 室内照片/
 frontend/node_modules/
-frontend/dist/
+frontend/dist/*
+!frontend/dist/index.html
+!frontend/dist/assets/
+frontend/dist/assets/*
+!frontend/dist/assets/index-*.js
+!frontend/dist/assets/index-*.css
 
 .pnpm-store/
 

@@ -52,6 +52,10 @@ with connect() as c:
     )
     if "pcl_stddev" not in {r["name"] for r in c.execute("pragma table_info(jobs)")}:
         c.execute("alter table jobs add column pcl_stddev real")
+    if "estimate_normals" not in {r["name"] for r in c.execute("pragma table_info(jobs)")}:
+        c.execute("alter table jobs add column estimate_normals integer not null default 0")
+    if "poisson_mesh" not in {r["name"] for r in c.execute("pragma table_info(jobs)")}:
+        c.execute("alter table jobs add column poisson_mesh integer not null default 0")
 
 
 def row(job):
@@ -299,6 +303,8 @@ def process(job):
         "audit_capture_result.py",
         "dense_cpu.py",
         "clean_point_cloud.py",
+        "estimate_normals.py",
+        "reconstruct_surface.py",
     ]:
         shutil.copy2(ROOT / "scripts" / filename, base / "code" / filename)
     shutil.copy2(ROOT / "requirements.web.lock.txt", base / "requirements.lock.txt")
@@ -310,6 +316,8 @@ def process(job):
                 clarity_warning_below=45,
                 small_batch=bool(j["small"]),
                 pcl_stddev=j["pcl_stddev"],
+                estimate_normals=bool(j["estimate_normals"]),
+                poisson_mesh=bool(j["poisson_mesh"]),
                 source=str(src),
                 scripts={
                     f.name: hashlib.sha256(f.read_bytes()).hexdigest()
@@ -374,12 +382,21 @@ def process(job):
             ply(target / "preview.ply", x[::step], rgb[::step])
             r["bounds"] = [x.min(0).tolist(), x.max(0).tolist()]
             results.append(r)
+            normal_source = target / "multiview-supported.ply"
             if j["pcl_stddev"] is not None:
                 threshold = j["pcl_stddev"]
                 execute(job, "pcl_cleaning", "clean_point_cloud.py", [
                     target / "multiview-supported.ply", target / f"pcl-sor-{threshold}",
                     "--stddev", threshold, "--binary", ROOT / "build/pcl_sor/pcl_sor",
                 ])
+                normal_source = target / f"pcl-sor-{threshold}/cleaned.ply"
+            if j["estimate_normals"] or j["poisson_mesh"]:
+                execute(job, "normal_estimation", "estimate_normals.py", [
+                    normal_source, target / "pcl-normals", target / "cameras-meters.json", src,
+                    "--binary", ROOT / "build/pcl_sor/pcl_normals",
+                ])
+            if j["poisson_mesh"]:
+                execute(job, "poisson_surface", "reconstruct_surface.py", [target / "pcl-normals", target / "poisson"])
         except InterruptedError:
             raise
         except Exception as e:
@@ -495,6 +512,8 @@ class Project(BaseModel):
 
 
 class CleaningConfig(BaseModel):
+    estimate_normals: bool = False
+    poisson_mesh: bool = False
     pcl_stddev: Literal[1.5, 2.0] | None = None
 
 
@@ -563,8 +582,8 @@ def create_upload(pid: str, cfg: UploadConfig):
         now = time.time()
         (jobdir(jid) / "upload").mkdir(parents=True)
         c.execute(
-            "insert into jobs(id,project_id,status,stage,created,updated,small,pcl_stddev) values(?,?,?,?,?,?,?,?)",
-            (jid, pid, "uploading", "uploading", now, now, cfg.small, cfg.pcl_stddev),
+            "insert into jobs(id,project_id,status,stage,created,updated,small,pcl_stddev,estimate_normals,poisson_mesh) values(?,?,?,?,?,?,?,?,?,?)",
+            (jid, pid, "uploading", "uploading", now, now, cfg.small, cfg.pcl_stddev, cfg.estimate_normals, cfg.poisson_mesh),
         )
     return dict(id=jid)
 
@@ -705,6 +724,15 @@ def get_job(job: str):
                     if (report.parent / f"{name}.ply").is_file():
                         variants.append(dict(path=f"{subdir}/{name}", points=counts[key],
                                              label=f"PCL {name} (σ = {threshold})"))
+        normal_dir = folder / "pcl-normals"
+        if (normal_dir / "normals.ply").is_file() and (normal_dir / "report.json").is_file():
+            report = json.loads((normal_dir / "report.json").read_text())
+            variants.append(dict(path="pcl-normals/normals", points=report["points"],
+                                 label=f"Point cloud with normals (k = {report['k']})"))
+        surface = folder / "poisson/report.json"
+        if surface.is_file() and (surface.parent / "mesh.ply").is_file():
+            mesh = json.loads(surface.read_text())
+            variants.append(dict(path="poisson/mesh", points=mesh["vertices"], label="Poisson surface"))
         model["pcl_variants"] = variants
     log = jobdir(job) / "execution.log"
     j["log"] = log.read_text(errors="replace")[-6000:] if log.exists() else ""
@@ -735,7 +763,7 @@ def retry(job: str, cfg: CleaningConfig | None = None):
         now = time.time()
         with connect() as c:
             c.execute(
-                "insert into jobs(id,project_id,status,stage,created,updated,small,source,pcl_stddev) values(?,?,?,?,?,?,?,?,?)",
+                "insert into jobs(id,project_id,status,stage,created,updated,small,source,pcl_stddev,estimate_normals,poisson_mesh) values(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     jid,
                     old["project_id"],
@@ -746,6 +774,8 @@ def retry(job: str, cfg: CleaningConfig | None = None):
                     old["small"],
                     str(capture_source(old)),
                     old["pcl_stddev"] if cfg is None else cfg.pcl_stddev,
+                    old["estimate_normals"] if cfg is None else cfg.estimate_normals,
+                    old["poisson_mesh"] if cfg is None else cfg.poisson_mesh,
                 ),
             )
         Q.put(jid)
